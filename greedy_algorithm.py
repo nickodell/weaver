@@ -9,17 +9,33 @@ from skimage.draw import line, line_aa
 running = True
 
 
+def crop_to_circle(array):
+    assert array.shape[0] == array.shape[1]
+    image_size = array.shape[0]
+    image_coords = np.arange(500)
+    x, y = np.meshgrid(image_coords, image_coords)
+    # Enable mask within circle of radius image_size / 2, centered in the middle of the image
+    mask = (x - image_size / 2) ** 2 + (y - image_size / 2) ** 2 < (image_size / 2) ** 2
+    return np.where(mask, array, 0)
+
+
 def load_image(filename):
     """Load image, converting to monochrome."""
     image = Image.open(filename)
-    image = image.resize((500, 500))
+    image_size = 500
+    image = image.resize((image_size, image_size))
     image = image.convert("L")
     image = np.asarray(image)
+    # Transpose to match pygame convention
+    image = image.T
     # Normalize to [0, 1]
     image = image.astype('float32')
     image /= 255
     # Make 1 maximum darkness instead of maximum brightness
     image = 1 - image
+    # Crop to circle
+    image = crop_to_circle(image)
+
     return image
     # print(np.asarray(image).shape)
     # print(np.asarray(image))
@@ -51,9 +67,7 @@ def copy_to_surface(surf, array):
     del array_access
 
 
-def get_nail_positions():
-    image_pixels = 500
-    num_nails = 300
+def get_nail_positions(image_pixels, num_nails):
     nails = np.linspace(0, 2*np.pi, num_nails)
     nails_x = np.cos(nails)
     nails_y = np.sin(nails)
@@ -64,13 +78,26 @@ def get_nail_positions():
     return nails
 
 
-def find_best_line(reference, nails, start_idx, target, half_circle=False):
+def line_loss(reference_pixels, target_pixels):
+    # return (reference_pixels - target_pixels).mean()
+    # return (reference_pixels - target_pixels).sum()
+    diff = reference_pixels - target_pixels
+    overdraw = np.where(diff < 0, diff, 0)
+    underdraw = np.where(diff > 0, diff, 0)
+    overdraw_penalty = 2
+    underdraw_penalty = 1
+
+    return (overdraw_penalty * overdraw.sum() + underdraw_penalty * underdraw.sum()) # / len(reference_pixels)
+
+
+def find_best_line(reference, nails, start_idx, target, half_circle=True):
     best_line_score = None
     best_line_index = None
-    for i in range(1,len(nails)):
+    limit = len(nails) // 2 if half_circle else len(nails)
+    for i in range(1, limit):
         i_wrapped = (start_idx + i) % len(nails)
         line_coords = line(*nails[start_idx], *nails[i_wrapped])
-        score = (reference[line_coords] - target[line_coords]).mean()
+        score = line_loss(reference[line_coords], target[line_coords])
         if best_line_score is None or score > best_line_score:
             best_line_score = score
             best_line_index = i_wrapped
@@ -80,7 +107,9 @@ def find_best_line(reference, nails, start_idx, target, half_circle=False):
 
 def find_line_configuration(reference, target):
     global running
-    nails = get_nail_positions()
+    num_nails = 300
+    image_pixels = reference.shape[0]
+    nails = get_nail_positions(image_pixels, num_nails)
     current_nail = 0
     
     while running:
@@ -96,21 +125,11 @@ def find_line_configuration(reference, target):
         current_nail = best_line_index
 
 
-        # time.sleep(0.1)
-            # time.sleep(0.1)
-            # breakpoint()
-            # out
-            # pass
-
-        # out[:] = 1
-        # time.sleep(1)
-
-
 def main():
     global running
     pygame.init()
     display = pygame.display.set_mode((1000, 500))
-    reference = load_image("test_images/circle_pattern.png")
+    reference = load_image("test_images/portrait.jpg")
     target = np.zeros_like(reference)
     reference_surf = create_monochrome_surf(reference.shape)
     target_surf = create_monochrome_surf(target.shape)
