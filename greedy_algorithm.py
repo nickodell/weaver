@@ -1,9 +1,11 @@
 from PIL import Image
 import numpy as np
+import numba as nb
 # import matplotlib.pyplot as plt
 import pygame
 import threading
 import time
+from functools import lru_cache
 from skimage.draw import line, line_aa
 
 running = True
@@ -78,19 +80,34 @@ def get_nail_positions(image_pixels, num_nails):
     return nails
 
 
-def line_loss(reference_pixels, target_pixels):
-    # return (reference_pixels - target_pixels).mean()
-    # return (reference_pixels - target_pixels).sum()
-    diff = reference_pixels - target_pixels
-    overdraw = np.where(diff < 0, diff, 0)
-    underdraw = np.where(diff > 0, diff, 0)
+def get_line_cache(nails):
+    cache = {}
+    for i in range(len(nails)):
+        for j in range(len(nails)):
+            if j != i:
+                cache[(i, j)] = line(*nails[i], *nails[j])
+    return cache
+
+
+@nb.njit
+def line_loss(reference, target, line_coords_x, line_coords_y):
     overdraw_penalty = 2
     underdraw_penalty = 1
+    sum_ = 0
+    for i in range(len(line_coords_x)):
+        x = line_coords_x[i]
+        y = line_coords_y[i]
+        reference_pixel = reference[x, y]
+        target_pixel = target[x, y]
+        diff = reference_pixel - target_pixel
+        multiplier = overdraw_penalty if diff < 0 else underdraw_penalty
+        sum_ += multiplier * diff
 
-    return (overdraw_penalty * overdraw.sum() + underdraw_penalty * underdraw.sum()) # / len(reference_pixels)
+    return sum_
 
 
-def find_best_line(reference, nails, start_idx, target, depth, half_circle, prune_factor, banlist=()):
+# @profile
+def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_circle, prune_factor, banlist=()):
     best_line_score = None
     best_line_score_ignoring_children = None
     best_line_index = None
@@ -105,12 +122,12 @@ def find_best_line(reference, nails, start_idx, target, depth, half_circle, prun
             # add another thread involving this nail because the score might
             # be incorrect.
             continue
-        line_coords = line(*nails[start_idx], *nails[i_wrapped])
-        score = line_loss(reference[line_coords], target[line_coords])
+        line_coords = line_cache[(start_idx, i_wrapped)]
+        score = line_loss(reference, target, *line_coords)
         score_tree = 0
         if depth > 0:
             new_banlist = banlist + (i_wrapped,)
-            _, score_tree, _ = find_best_line(reference, nails, i_wrapped, target, depth - 1, half_circle, prune_factor, new_banlist)
+            _, score_tree, _ = find_best_line(reference, nails, line_cache, i_wrapped, target, depth - 1, half_circle, prune_factor, new_banlist)
 
         if best_line_score is None or score + score_tree > best_line_score:
             best_line_score = score + score_tree
@@ -119,12 +136,13 @@ def find_best_line(reference, nails, start_idx, target, depth, half_circle, prun
     return best_line_index, best_line_score, best_line_score_ignoring_children
 
 
-
+# @profile
 def find_line_configuration(reference, target):
     global running
-    num_nails = 300
+    num_nails = 301
     image_pixels = reference.shape[0]
     nails = get_nail_positions(image_pixels, num_nails)
+    line_cache = get_line_cache(nails)
     current_nail = 0
     recent_score_avg = 1
     ema_alpha = 0.5
@@ -146,6 +164,7 @@ def find_line_configuration(reference, target):
         best_line_index, best_line_score, best_line_score_ignoring_children = find_best_line(
             reference=reference,
             nails=nails,
+            line_cache=line_cache,
             start_idx=current_nail,
             target=target,
             depth=depth,
@@ -191,7 +210,13 @@ def main():
     pygame.quit()
 
 
+def bench_main():
+    reference = load_image("test_images/portrait.jpg")
+    target = np.zeros_like(reference)
+    find_line_configuration(reference, target)
+
 if __name__ == '__main__':
     # load_image("test_images/circle_pattern.png")
     main()
+    # bench_main()
 
