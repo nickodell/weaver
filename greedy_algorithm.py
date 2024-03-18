@@ -90,18 +90,33 @@ def line_loss(reference_pixels, target_pixels):
     return (overdraw_penalty * overdraw.sum() + underdraw_penalty * underdraw.sum()) # / len(reference_pixels)
 
 
-def find_best_line(reference, nails, start_idx, target, half_circle=True):
+def find_best_line(reference, nails, start_idx, target, depth, half_circle, prune_factor, banlist=()):
     best_line_score = None
+    best_line_score_ignoring_children = None
     best_line_index = None
     limit = len(nails) // 2 if half_circle else len(nails)
-    for i in range(1, limit):
+    if prune_factor is None:
+        # Disable pruning
+        prune_factor = {0: 1}
+    for i in range(1, limit, prune_factor[depth]):
         i_wrapped = (start_idx + i) % len(nails)
+        if i_wrapped in banlist:
+            # We have visited this nail already in some parent call. We can't
+            # add another thread involving this nail because the score might
+            # be incorrect.
+            continue
         line_coords = line(*nails[start_idx], *nails[i_wrapped])
         score = line_loss(reference[line_coords], target[line_coords])
-        if best_line_score is None or score > best_line_score:
-            best_line_score = score
+        score_tree = 0
+        if depth > 0:
+            new_banlist = banlist + (i_wrapped,)
+            _, score_tree, _ = find_best_line(reference, nails, i_wrapped, target, depth - 1, half_circle, prune_factor, new_banlist)
+
+        if best_line_score is None or score + score_tree > best_line_score:
+            best_line_score = score + score_tree
+            best_line_score_ignoring_children = score
             best_line_index = i_wrapped
-    return best_line_index, best_line_score
+    return best_line_index, best_line_score, best_line_score_ignoring_children
 
 
 
@@ -111,14 +126,37 @@ def find_line_configuration(reference, target):
     image_pixels = reference.shape[0]
     nails = get_nail_positions(image_pixels, num_nails)
     current_nail = 0
+    recent_score_avg = 1
+    ema_alpha = 0.5
+    score_cutoff = 0
     
     while running:
         # target[:] = 0
         # time.sleep(1)
-        best_line_index, best_line_score = find_best_line(reference, nails, current_nail, target)
+        depth = 2
+        if depth == 0:
+            prune_factor = {0: 1}
+        elif depth == 1:
+            prune_factor = {1: 2, 0: 4}
+        elif depth == 2:
+            prune_factor = {2: 2, 1: 4, 0: 8}
+        else:
+            raise Exception()
+        half_circle = True
+        best_line_index, best_line_score, best_line_score_ignoring_children = find_best_line(
+            reference=reference,
+            nails=nails,
+            start_idx=current_nail,
+            target=target,
+            depth=depth,
+            half_circle=half_circle,
+            prune_factor=prune_factor,
+        )
         rr, cc, val = line_aa(*nails[current_nail], *nails[best_line_index])
-        print(f"Drawing line from {current_nail} to {best_line_index}, score {best_line_score:.2f}")
-        if best_line_score < 0:
+        print(f"Drawing line from {current_nail} to {best_line_index}, score {best_line_score_ignoring_children:.2f}")
+        recent_score_avg = (1 - ema_alpha) * recent_score_avg + ema_alpha * best_line_score_ignoring_children
+        print(f"EMA: {recent_score_avg:.2f}")
+        if recent_score_avg < score_cutoff:
             print("Done")
             break
         target[rr, cc] += val * 0.5
