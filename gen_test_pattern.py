@@ -13,7 +13,6 @@ def build_path(num_triangles):
             offset,
             offset + round(NAILS / 3),
             offset + round(2 * NAILS / 3),
-            offset,
         ]
         path.extend(p % NAILS for p in points)
     return path
