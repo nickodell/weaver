@@ -1,12 +1,20 @@
 import argparse
+import json
+import os
 
-from PIL import Image
-import numpy as np
 import numba as nb
-# import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
 from skimage.draw import line, line_aa
+from tqdm import tqdm
 
 from visualize_pattern import get_nail_positions as get_unit_nail_positions
+
+PRUNE_FACTORS = {
+    0: {0: 1},
+    1: {1: 2, 0: 4},
+    2: {2: 2, 1: 4, 0: 8},
+}
 
 
 def crop_to_circle(array):
@@ -25,10 +33,10 @@ def load_image(filename, image_size):
     image = image.resize((image_size, image_size))
     image = image.convert("L")
     image = np.asarray(image)
-    # Transpose to match pygame convention
+    # Transpose to match (x, y) pixel indexing used below
     image = image.T
     # Normalize to [0, 1]
-    image = image.astype('float32')
+    image = image.astype("float32")
     image /= 255
     # Make 1 maximum darkness instead of maximum brightness
     image = 1 - image
@@ -44,24 +52,18 @@ def remap_range(array, input_low, input_high, output_low, output_high):
     return (array - input_low) * mult + output_low
 
 
-
-def array_to_image(array):
-    """Convert array to a grayscale PIL Image.
-
-    In `array`, 1 indicates max darkness. Invert this to match pygame."""
-    array = 255 - (array.clip(0, 1) * 255).astype('uint8')
-    return Image.fromarray(array.T)
-
-
 def get_pixel_nail_positions(num_nails, image_size):
+    """Nail positions in pixel coordinates, matching the physical nail layout
+    used elsewhere (n=0 is up).
+
+    Pixel row 0 is the top of the image, but unit y=1 is "up", so the y axis
+    must be flipped relative to x when remapping into pixel space.
+    """
     nails = get_unit_nail_positions(num_nails)
     nails_x = remap_range(nails[:, 0], -1, 1, 0, image_size - 1)
-    # Pixel row 0 is the top of the image, but unit y=1 is "up", so the y axis
-    # must be flipped relative to x when remapping into pixel space.
     nails_y = remap_range(nails[:, 1], -1, 1, image_size - 1, 0)
     nails = np.column_stack([nails_x, nails_y])
-    nails = np.round(nails).astype('int64')
-    return nails
+    return np.round(nails).astype("int64")
 
 
 def get_line_cache(nails):
@@ -86,11 +88,9 @@ def line_loss(reference, target, line_coords_x, line_coords_y):
         diff = reference_pixel - target_pixel
         multiplier = overdraw_penalty if diff < 0 else underdraw_penalty
         sum_ += multiplier * diff
-
     return sum_
 
 
-# @profile
 def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_circle, prune_factor, banlist=()):
     best_line_score = None
     best_line_score_ignoring_children = None
@@ -117,70 +117,82 @@ def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_
     return best_line_index, best_line_score, best_line_score_ignoring_children
 
 
-PRUNE_FACTORS = {
-    0: {0: 1},
-    1: {1: 2, 0: 4},
-    2: {2: 2, 1: 4, 0: 8},
-}
-
-
-def find_line_configuration(reference, target, num_nails, depth, half_circle, score_cutoff, ema_alpha):
+def find_line_configuration(reference, num_nails, depth, half_circle, score_cutoff, ema_alpha):
     image_size = reference.shape[0]
     nails = get_pixel_nail_positions(num_nails, image_size)
     line_cache = get_line_cache(nails)
-    current_nail = 0
-    recent_score_avg = 1
+    target = np.zeros_like(reference)
     prune_factor = PRUNE_FACTORS[depth]
 
-    while True:
-        best_line_index, best_line_score, best_line_score_ignoring_children = find_best_line(
-            reference=reference,
-            nails=nails,
-            line_cache=line_cache,
-            start_idx=current_nail,
-            target=target,
-            depth=depth,
-            half_circle=half_circle,
-            prune_factor=prune_factor,
-        )
-        rr, cc, val = line_aa(*nails[current_nail], *nails[best_line_index])
-        print(f"Drawing line from {current_nail} to {best_line_index}, score {best_line_score_ignoring_children:.2f}")
-        recent_score_avg = (1 - ema_alpha) * recent_score_avg + ema_alpha * best_line_score_ignoring_children
-        print(f"EMA: {recent_score_avg:.2f}")
-        if recent_score_avg < score_cutoff:
-            print("Done")
-            break
-        target[rr, cc] += val * 0.5
-        current_nail = best_line_index
+    current_nail = 0
+    path = [current_nail]
+    recent_score_avg = 1
+
+    with tqdm(desc="Placing threads", unit=" thread") as pbar:
+        while True:
+            best_line_index, _, best_line_score_ignoring_children = find_best_line(
+                reference=reference,
+                nails=nails,
+                line_cache=line_cache,
+                start_idx=current_nail,
+                target=target,
+                depth=depth,
+                half_circle=half_circle,
+                prune_factor=prune_factor,
+            )
+            rr, cc, val = line_aa(*nails[current_nail], *nails[best_line_index])
+            recent_score_avg = (1 - ema_alpha) * recent_score_avg + ema_alpha * best_line_score_ignoring_children
+            pbar.set_postfix(ema_loss=f"{recent_score_avg:.2f}", cutoff=score_cutoff)
+            pbar.update(1)
+            if recent_score_avg < score_cutoff:
+                break
+            target[rr, cc] += val * 0.5
+            current_nail = best_line_index
+            path.append(current_nail)
+
+    return path
+
+
+def save_pattern(output_path, num_nails, image_path, image_size, path):
+    pattern = {
+        "nails": num_nails,
+        "image": image_path,
+        "image_size": image_size,
+        "path": path,
+    }
+    with open(output_path, "w") as f:
+        json.dump(pattern, f, indent=2)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image", default="test_images/chord_test.png")
+    parser.add_argument("image")
     parser.add_argument("--nails", type=int, default=400)
     parser.add_argument("--image-size", type=int, default=500)
     parser.add_argument("--depth", type=int, default=2, choices=sorted(PRUNE_FACTORS))
     parser.add_argument("--half-circle", action="store_true", default=True)
     parser.add_argument("--score-cutoff", type=float, default=0)
     parser.add_argument("--ema-alpha", type=float, default=0.5)
-    parser.add_argument("--output", default="pygame_output.bmp")
+    parser.add_argument("--output")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    output = args.output or os.path.join("patterns", os.path.splitext(os.path.basename(args.image))[0] + ".json")
+
     reference = load_image(args.image, args.image_size)
-    target = np.zeros_like(reference)
-    find_line_configuration(
-        reference, target,
+    path = find_line_configuration(
+        reference=reference,
         num_nails=args.nails,
         depth=args.depth,
         half_circle=args.half_circle,
         score_cutoff=args.score_cutoff,
         ema_alpha=args.ema_alpha,
     )
-    array_to_image(target).save(args.output)
+    save_pattern(output, args.nails, args.image, args.image_size, path)
+    print(f"Wrote {len(path)} nails to {output}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
