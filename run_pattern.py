@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
+import serial_control
 from table_config import TABLE_RADIUS_MM
 from visualize_pattern import get_nail_positions
 
@@ -19,14 +20,18 @@ def step_length_m(nails, current_pin, next_pin):
     return np.linalg.norm(diff) * TABLE_RADIUS_MM / 1000
 
 
-def send_pin(pin):
-    """Placeholder for sending a move command over serial."""
-    print(f"Would move to pin {pin}")
+def send_pin(ser, pin):
+    print(f"Moving to pin {pin}")
+    if ser is None:
+        time.sleep(STEP_DELAY)
+    else:
+        serial_control.send_pin(ser, pin)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("pattern")
+    parser.add_argument("--dry-run", action="store_true", help="print moves instead of sending them over serial")
     return parser.parse_args()
 
 
@@ -55,7 +60,7 @@ def redraw(fig):
     fig.canvas.flush_events()
 
 
-def run_steps(nails, path, fig, drawn_line, next_line):
+def run_steps(nails, path, fig, drawn_line, next_line, ser):
     drawn_x = [nails[path[0], 0]]
     drawn_y = [nails[path[0], 1]]
 
@@ -69,8 +74,7 @@ def run_steps(nails, path, fig, drawn_line, next_line):
                 [nails[current_pin, 1], nails[next_pin, 1]],
             )
             redraw(fig)
-            send_pin(next_pin)
-            time.sleep(STEP_DELAY)
+            send_pin(ser, next_pin)
 
             drawn_x.append(nails[next_pin, 0])
             drawn_y.append(nails[next_pin, 1])
@@ -87,7 +91,8 @@ def main():
     args = parse_args()
     nails, path = load_pattern(args.pattern)
     fig, drawn_line, next_line = setup_plot(nails)
-    run_steps(nails, path, fig, drawn_line, next_line)
+    ser = None if args.dry_run else serial_control.init_serial()
+    run_steps(nails, path, fig, drawn_line, next_line, ser)
     plt.ioff()
     plt.show()
 
