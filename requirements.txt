@@ -2,3 +2,6 @@ numpy
 tqdm
 matplotlib
 pyserial
+numba
+scikit-image
+pillow
