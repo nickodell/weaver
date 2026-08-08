@@ -41,6 +41,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("pattern")
     parser.add_argument("--dry-run", action="store_true", help="print moves instead of sending them over serial")
+    parser.add_argument("--debug-serial", action="store_true", help="print raw bytes read from and written to the serial port")
     return parser.parse_args()
 
 
@@ -104,6 +105,7 @@ def run_steps(nails, path, fig, ax, drawn_line, next_line, ser, pattern_name):
 
 def main():
     args = parse_args()
+    serial_control.debug = args.debug_serial
     pattern_name = os.path.basename(args.pattern)
     nails, path = load_pattern(args.pattern)
     fig, ax, drawn_line, next_line = setup_plot(nails, pattern_name)
