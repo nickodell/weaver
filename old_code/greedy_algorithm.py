@@ -188,9 +188,9 @@ def find_line_configuration(reference, target):
 def main():
     global running
     pygame.init()
-    set_up_serial()
+    # set_up_serial()
     display = pygame.display.set_mode((1000, 500))
-    reference = load_image("test_images/connie_scaled.jpg")
+    reference = load_image("test_images/chord_test.png")
     target = np.zeros_like(reference)
     reference_surf = create_monochrome_surf(reference.shape)
     target_surf = create_monochrome_surf(target.shape)
