@@ -1,0 +1,284 @@
+from PIL import Image
+import numpy as np
+import numba as nb
+# import matplotlib.pyplot as plt
+import pygame
+import threading
+import time
+from functools import lru_cache
+from skimage.draw import line, line_aa
+import serial
+import time
+
+running = True
+
+
+def crop_to_circle(array):
+    assert array.shape[0] == array.shape[1]
+    image_size = array.shape[0]
+    image_coords = np.arange(500)
+    x, y = np.meshgrid(image_coords, image_coords)
+    # Enable mask within circle of radius image_size / 2, centered in the middle of the image
+    mask = (x - image_size / 2) ** 2 + (y - image_size / 2) ** 2 < (image_size / 2) ** 2
+    return np.where(mask, array, 0)
+
+
+def load_image(filename):
+    """Load image, converting to monochrome."""
+    image = Image.open(filename)
+    image_size = 500
+    image = image.resize((image_size, image_size))
+    image = image.convert("L")
+    image = np.asarray(image)
+    # Transpose to match pygame convention
+    image = image.T
+    # Normalize to [0, 1]
+    image = image.astype('float32')
+    image /= 255
+    # Make 1 maximum darkness instead of maximum brightness
+    image = 1 - image
+    # Crop to circle
+    image = crop_to_circle(image)
+
+    return image
+    # print(np.asarray(image).shape)
+    # print(np.asarray(image))
+
+
+def remap_range(array, input_low, input_high, output_low, output_high):
+    input_range = input_high - input_low
+    output_range = output_high - output_low
+    mult = output_range / input_range
+    return (array - input_low) * mult + output_low
+
+
+
+def create_monochrome_surf(shape):
+    surf = pygame.Surface(shape, depth=8)
+    surf.set_palette([(i, i, i) for i in range(256)])
+    return surf
+
+
+def copy_to_surface(surf, array):
+    """Copy array to pygame.Surface
+
+    In `array`, 1 indicates max darkness.
+    Invert this to match pygame."""
+    array = 255 - (array.clip(0, 1) * 255).astype('uint8')
+    array_access = pygame.surfarray.pixels2d(surf)
+    array_access[:] = array
+    # Remove A to unlock surface
+    del array_access
+
+
+def get_nail_positions(image_pixels, num_nails):
+    nails = np.linspace(0, 2*np.pi, num_nails)
+    nails_x = np.cos(nails)
+    nails_y = np.sin(nails)
+    nails_x = remap_range(nails_x, -1, 1, 0, image_pixels - 1)
+    nails_y = remap_range(nails_y, -1, 1, 0, image_pixels - 1)
+    nails = np.column_stack([nails_x, nails_y])
+    nails = np.round(nails).astype('int64')
+    return nails
+
+
+def get_line_cache(nails):
+    cache = {}
+    for i in range(len(nails)):
+        for j in range(len(nails)):
+            if j != i:
+                cache[(i, j)] = line(*nails[i], *nails[j])
+    return cache
+
+
+@nb.njit
+def line_loss(reference, target, line_coords_x, line_coords_y):
+    overdraw_penalty = 2
+    underdraw_penalty = 1
+    sum_ = 0
+    for i in range(len(line_coords_x)):
+        x = line_coords_x[i]
+        y = line_coords_y[i]
+        reference_pixel = reference[x, y]
+        target_pixel = target[x, y]
+        diff = reference_pixel - target_pixel
+        multiplier = overdraw_penalty if diff < 0 else underdraw_penalty
+        sum_ += multiplier * diff
+
+    return sum_
+
+
+# @profile
+def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_circle, prune_factor, banlist=()):
+    best_line_score = None
+    best_line_score_ignoring_children = None
+    best_line_index = None
+    limit = len(nails) // 2 if half_circle else len(nails)
+    if prune_factor is None:
+        # Disable pruning
+        prune_factor = {0: 1}
+    for i in range(1, limit, prune_factor[depth]):
+        i_wrapped = (start_idx + i) % len(nails)
+        if i_wrapped in banlist:
+            # We have visited this nail already in some parent call. We can't
+            # add another thread involving this nail because the score might
+            # be incorrect.
+            continue
+        line_coords = line_cache[(start_idx, i_wrapped)]
+        score = line_loss(reference, target, *line_coords)
+        score_tree = 0
+        if depth > 0:
+            new_banlist = banlist + (i_wrapped,)
+            _, score_tree, _ = find_best_line(reference, nails, line_cache, i_wrapped, target, depth - 1, half_circle, prune_factor, new_banlist)
+
+        if best_line_score is None or score + score_tree > best_line_score:
+            best_line_score = score + score_tree
+            best_line_score_ignoring_children = score
+            best_line_index = i_wrapped
+    return best_line_index, best_line_score, best_line_score_ignoring_children
+
+
+# @profile
+def find_line_configuration(reference, target):
+    global running
+    num_nails = 400
+    image_pixels = reference.shape[0]
+    nails = get_nail_positions(image_pixels, num_nails)
+    line_cache = get_line_cache(nails)
+    current_nail = 0
+    recent_score_avg = 1
+    ema_alpha = 0.5
+    score_cutoff = 0
+    
+    while running:
+        # target[:] = 0
+        # time.sleep(1)
+        depth = 2
+        if depth == 0:
+            prune_factor = {0: 1}
+        elif depth == 1:
+            prune_factor = {1: 2, 0: 4}
+        elif depth == 2:
+            prune_factor = {2: 2, 1: 4, 0: 8}
+        else:
+            raise Exception()
+        half_circle = True
+        best_line_index, best_line_score, best_line_score_ignoring_children = find_best_line(
+            reference=reference,
+            nails=nails,
+            line_cache=line_cache,
+            start_idx=current_nail,
+            target=target,
+            depth=depth,
+            half_circle=half_circle,
+            prune_factor=prune_factor,
+        )
+        rr, cc, val = line_aa(*nails[current_nail], *nails[best_line_index])
+        print(f"Drawing line from {current_nail} to {best_line_index}, score {best_line_score_ignoring_children:.2f}")
+        #send_pin(best_line_index)
+        recent_score_avg = (1 - ema_alpha) * recent_score_avg + ema_alpha * best_line_score_ignoring_children
+        print(f"EMA: {recent_score_avg:.2f}")
+        if recent_score_avg < score_cutoff:
+            print("Done")
+            break
+        target[rr, cc] += val * 0.5
+        current_nail = best_line_index
+
+
+def main():
+    global running
+    pygame.init()
+    # set_up_serial()
+    display = pygame.display.set_mode((1000, 500))
+    reference = load_image("test_images/chord_test.png")
+    target = np.zeros_like(reference)
+    reference_surf = create_monochrome_surf(reference.shape)
+    target_surf = create_monochrome_surf(target.shape)
+    clock = pygame.time.Clock()
+    line_conf_thread = threading.Thread(target=find_line_configuration, args=(reference, target))
+    line_conf_thread.start()
+    copy_to_surface(reference_surf, reference)
+    display.blit(reference_surf, (0, 0))
+    while running:
+        copy_to_surface(target_surf, target)
+        display.blit(target_surf, (500, 0))
+        pygame.display.update()
+
+        # Sleep till next frame
+        clock.tick(60)
+
+        # Process events
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+    pygame.quit()
+
+
+def bench_main():
+    reference = load_image("test_images/connie_scaled.jpg")
+    target = np.zeros_like(reference)
+    find_line_configuration(reference, target)
+
+
+ser = None
+
+def send_pin(pin):
+    message = f"pin {pin}\n"
+    time.sleep(2)
+    ser.write(message.encode('utf-8'))
+    time.sleep(2)
+    while True:
+        raw_data = ser.readline()
+        if raw_data == b"READY\r\n":
+            print("breaking")
+            break
+        print(f"Got {raw_data}")
+
+
+def set_up_serial():
+    global ser
+    ser = serial.Serial(
+        port='/dev/cu.usbmodem1301', # Device port name
+        baudrate=115200, # Coordinated data speed (matches your hardware)
+        timeout=1 # Stops reading after 1 second if no data arrives
+    )
+
+    # # Allow some time for the hardware connection to initialize safely
+    # time.sleep(2)
+
+#     try:
+#         if ser.is_open:
+#             print(f"Connected successfully to: {ser.name}")
+            
+#             # 2. Writing Data (Strings must be encoded to bytes)
+#             message = "Hello Hardware\n"
+#             ser.write(message.encode('utf-8')) 
+#             print(f"Sent: {message.strip()}")
+
+#             # 3. Reading Data (Loop until you get a full newline response)
+#             print("Waiting for response...")
+#             while True:
+#                 if ser.in_waiting > 0: # Check if bytes are sitting in the buffer
+#                     # Read a full line up to the '\n' character
+#                     raw_data = ser.readline() 
+                    
+#                     # Decode raw bytes back into a readable string
+#                     decoded_text = raw_data.decode('utf-8').strip()
+#                     print(f"Received: {decoded_text}")
+#                     break
+
+#     except serial.SerialException as e:
+#         print(f"An error occurred over serial: {e}")
+
+#     finally:
+#         # 4. Always close the port when complete to free up system resources
+#         ser.close()
+#         print("Serial port closed")
+
+# if __name__ == "__main__":
+#     main2()
+
+if __name__ == '__main__':
+    # load_image("test_images/circle_pattern.png")
+    main()
+    # bench_main()
