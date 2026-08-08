@@ -29,6 +29,14 @@ def send_pin(ser, pin):
         serial_control.send_pin(ser, pin)
 
 
+def send_home(ser):
+    print("Homing")
+    if ser is None:
+        time.sleep(STEP_DELAY)
+    else:
+        serial_control.send_home(ser)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("pattern")
@@ -100,6 +108,7 @@ def main():
     nails, path = load_pattern(args.pattern)
     fig, ax, drawn_line, next_line = setup_plot(nails, pattern_name)
     ser = None if args.dry_run else serial_control.init_serial()
+    send_home(ser)
     run_steps(nails, path, fig, ax, drawn_line, next_line, ser, pattern_name)
     plt.ioff()
     plt.show()
