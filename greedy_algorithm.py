@@ -190,7 +190,7 @@ def main():
     pygame.init()
     set_up_serial()
     display = pygame.display.set_mode((1000, 500))
-    reference = load_image("test_images/einstein.jpg")
+    reference = load_image("test_images/connie_scaled.jpg")
     target = np.zeros_like(reference)
     reference_surf = create_monochrome_surf(reference.shape)
     target_surf = create_monochrome_surf(target.shape)
@@ -215,7 +215,7 @@ def main():
 
 
 def bench_main():
-    reference = load_image("test_images/portrait.jpg")
+    reference = load_image("test_images/connie_scaled.jpg")
     target = np.zeros_like(reference)
     find_line_configuration(reference, target)
 
