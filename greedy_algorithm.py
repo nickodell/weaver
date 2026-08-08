@@ -7,6 +7,8 @@ import threading
 import time
 from functools import lru_cache
 from skimage.draw import line, line_aa
+import serial
+import time
 
 running = True
 
@@ -139,7 +141,7 @@ def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_
 # @profile
 def find_line_configuration(reference, target):
     global running
-    num_nails = 301
+    num_nails = 400
     image_pixels = reference.shape[0]
     nails = get_nail_positions(image_pixels, num_nails)
     line_cache = get_line_cache(nails)
@@ -173,6 +175,7 @@ def find_line_configuration(reference, target):
         )
         rr, cc, val = line_aa(*nails[current_nail], *nails[best_line_index])
         print(f"Drawing line from {current_nail} to {best_line_index}, score {best_line_score_ignoring_children:.2f}")
+        #send_pin(best_line_index)
         recent_score_avg = (1 - ema_alpha) * recent_score_avg + ema_alpha * best_line_score_ignoring_children
         print(f"EMA: {recent_score_avg:.2f}")
         if recent_score_avg < score_cutoff:
@@ -185,8 +188,9 @@ def find_line_configuration(reference, target):
 def main():
     global running
     pygame.init()
+    set_up_serial()
     display = pygame.display.set_mode((1000, 500))
-    reference = load_image("test_images/portrait.jpg")
+    reference = load_image("test_images/einstein.jpg")
     target = np.zeros_like(reference)
     reference_surf = create_monochrome_surf(reference.shape)
     target_surf = create_monochrome_surf(target.shape)
@@ -215,8 +219,66 @@ def bench_main():
     target = np.zeros_like(reference)
     find_line_configuration(reference, target)
 
+
+ser = None
+
+def send_pin(pin):
+    message = f"pin {pin}\n"
+    time.sleep(2)
+    ser.write(message.encode('utf-8'))
+    time.sleep(2)
+    while True:
+        raw_data = ser.readline()
+        if raw_data == b"READY\r\n":
+            print("breaking")
+            break
+        print(f"Got {raw_data}")
+
+
+def set_up_serial():
+    global ser
+    ser = serial.Serial(
+        port='/dev/cu.usbmodem1301', # Device port name
+        baudrate=115200, # Coordinated data speed (matches your hardware)
+        timeout=1 # Stops reading after 1 second if no data arrives
+    )
+
+    # # Allow some time for the hardware connection to initialize safely
+    # time.sleep(2)
+
+#     try:
+#         if ser.is_open:
+#             print(f"Connected successfully to: {ser.name}")
+            
+#             # 2. Writing Data (Strings must be encoded to bytes)
+#             message = "Hello Hardware\n"
+#             ser.write(message.encode('utf-8')) 
+#             print(f"Sent: {message.strip()}")
+
+#             # 3. Reading Data (Loop until you get a full newline response)
+#             print("Waiting for response...")
+#             while True:
+#                 if ser.in_waiting > 0: # Check if bytes are sitting in the buffer
+#                     # Read a full line up to the '\n' character
+#                     raw_data = ser.readline() 
+                    
+#                     # Decode raw bytes back into a readable string
+#                     decoded_text = raw_data.decode('utf-8').strip()
+#                     print(f"Received: {decoded_text}")
+#                     break
+
+#     except serial.SerialException as e:
+#         print(f"An error occurred over serial: {e}")
+
+#     finally:
+#         # 4. Always close the port when complete to free up system resources
+#         ser.close()
+#         print("Serial port closed")
+
+# if __name__ == "__main__":
+#     main2()
+
 if __name__ == '__main__':
     # load_image("test_images/circle_pattern.png")
     main()
     # bench_main()
-
