@@ -56,7 +56,7 @@ def setup_plot(nails):
 
 
 def redraw(fig):
-    fig.canvas.draw_idle()
+    fig.canvas.draw()
     fig.canvas.flush_events()
 
 
