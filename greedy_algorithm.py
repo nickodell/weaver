@@ -8,6 +8,7 @@ from PIL import Image
 from skimage.draw import line_aa
 from tqdm import tqdm
 
+from live_preview import LivePreview
 from visualize_pattern import get_nail_positions as get_unit_nail_positions
 
 PRUNE_FACTORS = {
@@ -149,7 +150,7 @@ def find_best_line(reference, nails_x, nails_y, start_idx, target, depth, half_c
     return best_line_index, best_line_score, best_line_score_ignoring_children
 
 
-def find_line_configuration(reference, num_nails, depth, half_circle, score_cutoff, ema_alpha):
+def find_line_configuration(reference, num_nails, depth, half_circle, score_cutoff, ema_alpha, preview=False, pattern_name=""):
     image_size = reference.shape[0]
     nails = get_pixel_nail_positions(num_nails, image_size)
     nails_x = np.ascontiguousarray(nails[:, 0])
@@ -163,6 +164,10 @@ def find_line_configuration(reference, num_nails, depth, half_circle, score_cuto
     current_nail = 0
     path = [current_nail]
     recent_score_avg = 1
+
+    if preview:
+        nails_unit = get_unit_nail_positions(num_nails)
+        live_preview = LivePreview(nails_unit, pattern_name)
 
     with tqdm(desc="Placing threads", unit=" thread") as pbar:
         while True:
@@ -188,6 +193,9 @@ def find_line_configuration(reference, num_nails, depth, half_circle, score_cuto
             current_nail = best_line_index
             path.append(current_nail)
 
+            if preview:
+                live_preview.add_point(nails_unit[current_nail, 0], nails_unit[current_nail, 1])
+
     return path
 
 
@@ -212,6 +220,7 @@ def parse_args():
     parser.add_argument("--score-cutoff", type=float, default=0)
     parser.add_argument("--ema-alpha", type=float, default=0.5)
     parser.add_argument("--output")
+    parser.add_argument("--preview", action="store_true", help="show a live plot of threads as they're found")
     return parser.parse_args()
 
 
@@ -227,6 +236,8 @@ def main():
         half_circle=args.half_circle,
         score_cutoff=args.score_cutoff,
         ema_alpha=args.ema_alpha,
+        preview=args.preview,
+        pattern_name=os.path.basename(output),
     )
     save_pattern(output, args.nails, args.image, args.image_size, path)
     print(f"Wrote {len(path)} nails to {output}")
