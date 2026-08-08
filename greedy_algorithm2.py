@@ -4,7 +4,7 @@ import numba as nb
 # import matplotlib.pyplot as plt
 from skimage.draw import line, line_aa
 
-running = True
+from visualize_pattern import get_nail_positions as get_unit_nail_positions
 
 
 def crop_to_circle(array):
@@ -17,10 +17,9 @@ def crop_to_circle(array):
     return np.where(mask, array, 0)
 
 
-def load_image(filename):
+def load_image(filename, image_size):
     """Load image, converting to monochrome."""
     image = Image.open(filename)
-    image_size = 500
     image = image.resize((image_size, image_size))
     image = image.convert("L")
     image = np.asarray(image)
@@ -33,10 +32,7 @@ def load_image(filename):
     image = 1 - image
     # Crop to circle
     image = crop_to_circle(image)
-
     return image
-    # print(np.asarray(image).shape)
-    # print(np.asarray(image))
 
 
 def remap_range(array, input_low, input_high, output_low, output_high):
@@ -55,13 +51,12 @@ def array_to_image(array):
     return Image.fromarray(array.T)
 
 
-def get_nail_positions(image_pixels, num_nails):
-    # n=0 is up
-    angles = np.linspace(0, 2*np.pi, num_nails, endpoint=False)
-    nails_x = -np.sin(angles)
-    nails_y = np.cos(angles)
-    nails_x = remap_range(nails_x, -1, 1, 0, image_pixels - 1)
-    nails_y = remap_range(nails_y, -1, 1, 0, image_pixels - 1)
+def get_pixel_nail_positions(num_nails, image_size):
+    nails = get_unit_nail_positions(num_nails)
+    nails_x = remap_range(nails[:, 0], -1, 1, 0, image_size - 1)
+    # Pixel row 0 is the top of the image, but unit y=1 is "up", so the y axis
+    # must be flipped relative to x when remapping into pixel space.
+    nails_y = remap_range(nails[:, 1], -1, 1, image_size - 1, 0)
     nails = np.column_stack([nails_x, nails_y])
     nails = np.round(nails).astype('int64')
     return nails
@@ -120,31 +115,27 @@ def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_
     return best_line_index, best_line_score, best_line_score_ignoring_children
 
 
-# @profile
+PRUNE_FACTORS = {
+    0: {0: 1},
+    1: {1: 2, 0: 4},
+    2: {2: 2, 1: 4, 0: 8},
+}
+
+
 def find_line_configuration(reference, target):
-    global running
     num_nails = 400
-    image_pixels = reference.shape[0]
-    nails = get_nail_positions(image_pixels, num_nails)
+    image_size = reference.shape[0]
+    nails = get_pixel_nail_positions(num_nails, image_size)
     line_cache = get_line_cache(nails)
     current_nail = 0
     recent_score_avg = 1
     ema_alpha = 0.5
     score_cutoff = 0
-    
-    while running:
-        # target[:] = 0
-        # time.sleep(1)
-        depth = 2
-        if depth == 0:
-            prune_factor = {0: 1}
-        elif depth == 1:
-            prune_factor = {1: 2, 0: 4}
-        elif depth == 2:
-            prune_factor = {2: 2, 1: 4, 0: 8}
-        else:
-            raise Exception()
-        half_circle = True
+    depth = 2
+    prune_factor = PRUNE_FACTORS[depth]
+    half_circle = True
+
+    while True:
         best_line_index, best_line_score, best_line_score_ignoring_children = find_best_line(
             reference=reference,
             nails=nails,
@@ -167,14 +158,14 @@ def find_line_configuration(reference, target):
 
 
 def main():
-    reference = load_image("test_images/chord_test.png")
+    reference = load_image("test_images/chord_test.png", 500)
     target = np.zeros_like(reference)
     find_line_configuration(reference, target)
     array_to_image(target).save("pygame_output.bmp")
 
 
 def bench_main():
-    reference = load_image("test_images/connie_scaled.jpg")
+    reference = load_image("test_images/connie_scaled.jpg", 500)
     target = np.zeros_like(reference)
     find_line_configuration(reference, target)
 
