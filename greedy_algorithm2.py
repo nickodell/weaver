@@ -1,3 +1,5 @@
+import argparse
+
 from PIL import Image
 import numpy as np
 import numba as nb
@@ -122,18 +124,13 @@ PRUNE_FACTORS = {
 }
 
 
-def find_line_configuration(reference, target):
-    num_nails = 400
+def find_line_configuration(reference, target, num_nails, depth, half_circle, score_cutoff, ema_alpha):
     image_size = reference.shape[0]
     nails = get_pixel_nail_positions(num_nails, image_size)
     line_cache = get_line_cache(nails)
     current_nail = 0
     recent_score_avg = 1
-    ema_alpha = 0.5
-    score_cutoff = 0
-    depth = 2
     prune_factor = PRUNE_FACTORS[depth]
-    half_circle = True
 
     while True:
         best_line_index, best_line_score, best_line_score_ignoring_children = find_best_line(
@@ -157,20 +154,33 @@ def find_line_configuration(reference, target):
         current_nail = best_line_index
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image", default="test_images/chord_test.png")
+    parser.add_argument("--nails", type=int, default=400)
+    parser.add_argument("--image-size", type=int, default=500)
+    parser.add_argument("--depth", type=int, default=2, choices=sorted(PRUNE_FACTORS))
+    parser.add_argument("--half-circle", action="store_true", default=True)
+    parser.add_argument("--score-cutoff", type=float, default=0)
+    parser.add_argument("--ema-alpha", type=float, default=0.5)
+    parser.add_argument("--output", default="pygame_output.bmp")
+    return parser.parse_args()
+
+
 def main():
-    reference = load_image("test_images/chord_test.png", 500)
+    args = parse_args()
+    reference = load_image(args.image, args.image_size)
     target = np.zeros_like(reference)
-    find_line_configuration(reference, target)
-    array_to_image(target).save("pygame_output.bmp")
-
-
-def bench_main():
-    reference = load_image("test_images/connie_scaled.jpg", 500)
-    target = np.zeros_like(reference)
-    find_line_configuration(reference, target)
+    find_line_configuration(
+        reference, target,
+        num_nails=args.nails,
+        depth=args.depth,
+        half_circle=args.half_circle,
+        score_cutoff=args.score_cutoff,
+        ema_alpha=args.ema_alpha,
+    )
+    array_to_image(target).save(args.output)
 
 
 if __name__ == '__main__':
-    # load_image("test_images/circle_pattern.png")
     main()
-    # bench_main()
