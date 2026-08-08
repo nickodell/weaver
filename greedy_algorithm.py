@@ -5,7 +5,7 @@ import os
 import numba as nb
 import numpy as np
 from PIL import Image
-from skimage.draw import line, line_aa
+from skimage.draw import line_aa
 from tqdm import tqdm
 
 from visualize_pattern import get_nail_positions as get_unit_nail_positions
@@ -66,51 +66,83 @@ def get_pixel_nail_positions(num_nails, image_size):
     return np.round(nails).astype("int64")
 
 
-def get_line_cache(nails):
-    cache = {}
-    for i in range(len(nails)):
-        for j in range(len(nails)):
-            if j != i:
-                cache[(i, j)] = line(*nails[i], *nails[j])
-    return cache
+@nb.njit(cache=True)
+def bresenham_line(x0, y0, x1, y1):
+    """Yield the pixel coordinates from (x0, y0) to (x1, y1) inclusive.
+
+    Matches skimage.draw.line's pixel walk exactly."""
+    dx = abs(x1 - x0)
+    dy = -abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    x, y = x0, y0
+    while True:
+        yield x, y
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x += sx
+        if e2 <= dx:
+            err += dx
+            y += sy
 
 
-@nb.njit
-def line_loss(reference, target, line_coords_x, line_coords_y):
+@nb.njit(cache=True)
+def line_loss(reference, target, x0, y0, x1, y1):
+    """Sum of overdraw/underdraw-penalized pixel diffs along the line from
+    (x0, y0) to (x1, y1)."""
     overdraw_penalty = 2
     underdraw_penalty = 1
-    sum_ = 0
-    for i in range(len(line_coords_x)):
-        x = line_coords_x[i]
-        y = line_coords_y[i]
-        reference_pixel = reference[x, y]
-        target_pixel = target[x, y]
-        diff = reference_pixel - target_pixel
+    sum_ = 0.0
+    for x, y in bresenham_line(x0, y0, x1, y1):
+        diff = reference[x, y] - target[x, y]
         multiplier = overdraw_penalty if diff < 0 else underdraw_penalty
         sum_ += multiplier * diff
     return sum_
 
 
-def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_circle, prune_factor, banlist=()):
-    best_line_score = None
-    best_line_score_ignoring_children = None
-    best_line_index = None
-    limit = len(nails) // 2 if half_circle else len(nails)
+@nb.njit(cache=True)
+def find_best_line(reference, nails_x, nails_y, start_idx, target, depth, half_circle, prune_factor, banlist, banlist_len):
+    num_nails = len(nails_x)
+    best_line_score = 0.0
+    best_line_score_ignoring_children = 0.0
+    best_line_index = -1
+    have_best = False
+    limit = num_nails // 2 if half_circle else num_nails
     for i in range(1, limit, prune_factor[depth]):
-        i_wrapped = (start_idx + i) % len(nails)
-        if i_wrapped in banlist:
-            # We have visited this nail already in some parent call. We can't
-            # add another thread involving this nail because the score might
-            # be incorrect.
+        i_wrapped = (start_idx + i) % num_nails
+        banned = False
+        for k in range(banlist_len):
+            if banlist[k] == i_wrapped:
+                # We have visited this nail already in some parent call. We can't
+                # add another thread involving this nail because the score might
+                # be incorrect.
+                banned = True
+                break
+        if banned:
             continue
-        line_coords = line_cache[(start_idx, i_wrapped)]
-        score = line_loss(reference, target, *line_coords)
-        score_tree = 0
+        score = line_loss(reference, target, nails_x[start_idx], nails_y[start_idx], nails_x[i_wrapped], nails_y[i_wrapped])
+        score_tree = 0.0
         if depth > 0:
-            new_banlist = banlist + (i_wrapped,)
-            _, score_tree, _ = find_best_line(reference, nails, line_cache, i_wrapped, target, depth - 1, half_circle, prune_factor, new_banlist)
+            banlist[banlist_len] = i_wrapped
+            _, score_tree, _ = find_best_line(
+                reference=reference,
+                nails_x=nails_x,
+                nails_y=nails_y,
+                start_idx=i_wrapped,
+                target=target,
+                depth=depth - 1,
+                half_circle=half_circle,
+                prune_factor=prune_factor,
+                banlist=banlist,
+                banlist_len=banlist_len + 1,
+            )
 
-        if best_line_score is None or score + score_tree > best_line_score:
+        if not have_best or score + score_tree > best_line_score:
+            have_best = True
             best_line_score = score + score_tree
             best_line_score_ignoring_children = score
             best_line_index = i_wrapped
@@ -120,9 +152,13 @@ def find_best_line(reference, nails, line_cache, start_idx, target, depth, half_
 def find_line_configuration(reference, num_nails, depth, half_circle, score_cutoff, ema_alpha):
     image_size = reference.shape[0]
     nails = get_pixel_nail_positions(num_nails, image_size)
-    line_cache = get_line_cache(nails)
+    nails_x = np.ascontiguousarray(nails[:, 0])
+    nails_y = np.ascontiguousarray(nails[:, 1])
     target = np.zeros_like(reference)
-    prune_factor = PRUNE_FACTORS[depth]
+    prune_factor = np.zeros(depth + 1, dtype="int64")
+    for level, step in PRUNE_FACTORS[depth].items():
+        prune_factor[level] = step
+    banlist = np.zeros(depth, dtype="int64")
 
     current_nail = 0
     path = [current_nail]
@@ -132,13 +168,15 @@ def find_line_configuration(reference, num_nails, depth, half_circle, score_cuto
         while True:
             best_line_index, _, best_line_score_ignoring_children = find_best_line(
                 reference=reference,
-                nails=nails,
-                line_cache=line_cache,
+                nails_x=nails_x,
+                nails_y=nails_y,
                 start_idx=current_nail,
                 target=target,
                 depth=depth,
                 half_circle=half_circle,
                 prune_factor=prune_factor,
+                banlist=banlist,
+                banlist_len=0,
             )
             rr, cc, val = line_aa(*nails[current_nail], *nails[best_line_index])
             recent_score_avg = (1 - ema_alpha) * recent_score_avg + ema_alpha * best_line_score_ignoring_children
