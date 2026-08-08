@@ -56,9 +56,10 @@ def array_to_image(array):
 
 
 def get_nail_positions(image_pixels, num_nails):
-    nails = np.linspace(0, 2*np.pi, num_nails)
-    nails_x = np.cos(nails)
-    nails_y = np.sin(nails)
+    # n=0 is up
+    angles = np.linspace(0, 2*np.pi, num_nails, endpoint=False)
+    nails_x = -np.sin(angles)
+    nails_y = np.cos(angles)
     nails_x = remap_range(nails_x, -1, 1, 0, image_pixels - 1)
     nails_y = remap_range(nails_y, -1, 1, 0, image_pixels - 1)
     nails = np.column_stack([nails_x, nails_y])
