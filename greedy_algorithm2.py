@@ -211,6 +211,7 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+    pygame.image.save(target_surf.convert(24), "pygame_output.bmp")
     pygame.quit()
 
 
